@@ -28,6 +28,13 @@ const path = require('path');
 // happened to spawn the adapter from.
 const PLUGIN_DIR = __dirname;
 
+// Managed instances never borrow the terminal's native configuration home.
+// Apply once so catalogue, authentication and all child processes agree.
+if (process.env.AGENT_HUB_HARNESS_DIR) {
+  process.env.PI_CODING_AGENT_DIR = path.join(process.env.AGENT_HUB_HARNESS_DIR, 'pi-agent');
+}
+
+
 // The core hands each agent a scratch dir via AGENT_HUB_HARNESS_DIR; session
 // records go there and nowhere else. No fallback: runtime data must never
 // land next to the plugin code (which may live in a watched source tree).
@@ -294,27 +301,18 @@ let pi = null;            // ChildProcess
 let sid = null;           // bus session id
 let nextBusId = 1;        // ids the adapter picks when talking to pi
 const pendingPi = new Map();     // pi response id → resolver
-// pi's own level names, used only to NAME the levels a model declared. The core
-// reports where a list came from (thinkingLevelsSource); an adapter's job is to
-// say what the harness said, not to decide which levels are usable. A model
-// whose declaration carries no level map has declared nothing, so nothing is
-// reported for it and the core answers 'default' — the harness still has a
-// default, the adapter simply does not know it and must not invent one.
-const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-
-// A model's DECLARED levels, per its own thinkingLevelMap: a mapped null removes
-// a level, `xhigh`/`max` exist only when the map names them, everything else is
-// offered unless removed. No map at all = nothing declared = null (absence).
-function declaredThinkingLevels(m) {
-  if (m.reasoning !== true) return null;
+// The thinking levels a model's configuration states, read as data and passed on
+// verbatim: an explicit `thinkingLevels` list, or the names an older pi-style
+// `thinkingLevelMap` maps (a null value removes that name). No list = the config
+// says nothing, which is not the same as an empty list. Nothing is inferred from
+// either shape: a harness's own rules about what it can use are the harness's
+// business, not this adapter's.
+function configThinkingLevels(m) {
+  if (!m || typeof m !== 'object') return null;
+  if (Array.isArray(m.thinkingLevels)) return m.thinkingLevels.filter((l) => typeof l === 'string' && l);
   const map = m.thinkingLevelMap;
-  if (!map || typeof map !== 'object') return null;
-  return PI_THINKING_LEVELS.filter((level) => {
-    const mapped = map[level];
-    if (mapped === null) return false;
-    if (level === 'xhigh' || level === 'max') return mapped !== undefined;
-    return true;
-  });
+  if (map && typeof map === 'object') return Object.keys(map).filter((level) => map[level] !== null && map[level] !== undefined);
+  return null;
 }
 const pendingApprovals = new Map(); // pi extension_ui_request id → resolver (confirm)
 const pendingQuestions = new Map(); // pi extension_ui_request id → resolver (select)
@@ -382,17 +380,13 @@ function buildInjectedDir() {
   return dir;
 }
 
-// pi's thinkingLevelMap is a mapping, not a list: a level appears only if the
-// map names the level pi would send for it. The declared efforts are the levels
-// the model accepts, so each one maps to itself and the rest stay absent — a
-// model that declares no effort gets no map, which is what makes pi treat it as
-// having no levels to offer rather than offering the wrong ones.
+// A declaration's levels become the harness's own level map, mechanically: each
+// declared name maps to itself. What that map means to the harness (and what it
+// accepts beyond it) is the harness's own rule; the adapter only copies data.
 function thinkingLevelMapFor(decl) {
-  const efforts = decl && decl.reasoning && Array.isArray(decl.reasoning.efforts) ? decl.reasoning.efforts : null;
-  if (!efforts || !efforts.length) return null;
-  const map = {};
-  for (const level of efforts) map[level] = level;
-  return map;
+  const levels = Array.isArray(decl?.thinkingLevels) ? decl.thinkingLevels.filter((l) => typeof l === 'string' && l) : null;
+  if (!levels || !levels.length) return null;
+  return Object.fromEntries(levels.map((level) => [level, level]));
 }
 
 function applyInjectedProvider(dir, modelIds) {
@@ -473,9 +467,24 @@ function startPi(resumeRef) {
   // file/command tools act on the user's project, not the plugin directory.
   const cwd = process.env.AGENT_HUB_CWD || undefined;
   harnessUp = null; harnessUpResolve = null;   // a new child is a new readiness question
-  pi = spawn(piRuntime.cmd, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'inherit'], env, ...(cwd ? { cwd } : {}) });
-  // pi's stderr is inherited from this adapter, so the core logs it; nothing
-  // to drain here (child.stderr is null under 'inherit').
+  pi = spawn(piRuntime.cmd, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env, ...(cwd ? { cwd } : {}) });
+  // The harness's stderr is READ here, not inherited: its lines are what explains an exit,
+  // and without a prefix the reader cannot tell which process said what. The last few are
+  // kept so the exit message can carry a reason instead of a code.
+  const harnessTail = [];
+  pi.stderr.setEncoding('utf8');
+  let perr = '';
+  pi.stderr.on('data', (chunk) => {
+    perr += chunk;
+    let j;
+    while ((j = perr.indexOf(String.fromCharCode(10))) >= 0) {
+      const line = perr.slice(0, j).trimEnd(); perr = perr.slice(j + 1);
+      if (!line.trim()) continue;
+      harnessTail.push(line);
+      if (harnessTail.length > 20) harnessTail.shift();
+      process.stderr.write('[pi-harness] ' + line + String.fromCharCode(10));
+    }
+  });
   let pbuf = '';
   pi.stdout.setEncoding('utf8');
   pi.stdout.on('data', (d) => {
@@ -499,6 +508,9 @@ function startPi(resumeRef) {
     for (const [, resolve] of pendingPi) resolve(null);
     pendingPi.clear();
     if (sid) process.stderr.write(`[pi-adapter] pi exited code=${code}\n`);
+    // The reason, in the harness's own words, on the adapter's stderr: the client shows the
+    // adapter's last lines, and "exited code=1" on its own explains nothing.
+    if (harnessTail.length) process.stderr.write('[pi-adapter] the harness said:' + String.fromCharCode(10) + harnessTail.join(String.fromCharCode(10)) + String.fromCharCode(10));
     process.exit(code == null ? 1 : 0);
   });
   return ref;
@@ -524,6 +536,15 @@ function handlePiMessage(msg) {
   }
   if (msg.type === 'extension_ui_request') {
     const reqId = msg.id;
+    if (msg.method === 'notify') {
+      const message = msg.message ?? msg.params?.message;
+      if (typeof message === 'string') send({ jsonrpc: '2.0', method: 'event', params: { sid, data: {
+        type: 'notification', message: message.slice(0, 32768),
+        level: ['info', 'warning', 'error'].includes(msg.notifyType) ? msg.notifyType : 'info',
+      } } });
+      return;
+    }
+
     const structuredReview = msg.method === 'input' && (msg.title ?? msg.params?.title) === 'tool-review/v2';
     if (msg.method === 'confirm' || structuredReview) {
       let reviewContext;
@@ -914,7 +935,7 @@ function handleBusMessage(msg) {
         send({ jsonrpc: '2.0', id, error: { code: -32000, message: 'no session open' } });
         return;
       }
-      appendTranscript({ id: params.clientMessageId, role: 'user', text: params.message, complete: true });
+      appendTranscript({ id: params.clientMessageId, role: 'user', source: params.source || 'user', text: params.message, complete: true });
       piRequest({ type: 'get_state' }).then((st) => process.stderr.write(`[adapter] get_state at prompt: model=${JSON.stringify(st && st.data && st.data.model && st.data.model.id)} provider=${JSON.stringify(st && st.data && st.data.model && st.data.model.provider)}\n`)).catch(() => {});
       // Do NOT arm the new turn yet: a stale turn_end from a just-aborted turn
       // can still arrive. pi cannot emit the new turn's turn_end before it
@@ -1080,11 +1101,28 @@ function handleBusMessage(msg) {
       const reply = (message) => { if (!replied) { replied = true; send(message); } };
       let pendingCount = 1; // synchronous scheduling owns the first slot
       const applied = {};
+      let applyThinkingAfterModel = null;
       const settle = () => {
         pendingCount -= 1;
         if (pendingCount > 0) return;
         if (applied.preset === undefined && presetId !== undefined && activePresetId !== null) applied.preset = activePresetId;
-        reply({ jsonrpc: '2.0', id, result: Object.keys(applied).length ? { applied, requires: 'none' } : {} });
+        if (replied) return;
+        // Snapshot actual configuration even when caller omitted a model/level.
+        piRequest({ type: 'get_state' }).then(state => {
+          if (state?.success !== true) throw new Error('cannot read effective configuration');
+          const actual = state.data;
+          if (actual.model) { applied.model = actual.model.id; applied.connectionId = actual.model.provider; }
+          applied.thinkingLevel = typeof actual.thinkingLevel === 'string' ? actual.thinkingLevel : null;
+          return piRequest({ type: 'get_entries' });
+        }).then(result => {
+          if (result?.success !== true) throw new Error('cannot read session policy');
+          const entries = result.data?.entries || [];
+          const planEntry = entries.filter(e => e.customType === 'plan/mode').at(-1);
+          const reviewEntry = entries.filter(e => e.customType === 'hub-review/state').at(-1);
+          if (typeof planEntry?.data?.active === 'boolean') applied.plan = planEntry.data.active;
+          if (typeof reviewEntry?.data?.asking === 'boolean') applied.review = reviewEntry.data.asking;
+          reply({ jsonrpc: '2.0', id, result: { applied, requires: 'none' } });
+        }).catch(error => reply({ jsonrpc: '2.0', id, error: { code: -32000, message: error.message } }));
       };
 
       if (presetId !== undefined) {
@@ -1178,26 +1216,31 @@ function handleBusMessage(msg) {
         // The level is the harness's own; set it through pi's rpc and report only
         // what pi confirmed. A rejected or unanswered set is never success.
         const reject = (message) => reply({ jsonrpc: '2.0', id, error: { code: -32000, message, data: { code: 'thinking-level-not-applied' } } });
-        if (!PI_THINKING_LEVELS.includes(thinkingLevel)) { reject('unsupported thinking level: ' + thinkingLevel); return; }
         if (!(pi && !turnActive)) { reject('cannot set thinking level: no idle harness'); return; }
         pendingCount += 1;
         let done = false;
         let timer = null;
         const giveUp = (message) => { if (done) return; done = true; if (timer) clearTimeout(timer); reject(message); };
-        harnessUpProof(120000)
+        const applyThinking = () => harnessUpProof(120000)
           .then(() => {
             if (done) return;
             timer = setTimeout(() => giveUp('set_thinking_level did not confirm before its deadline'), 30000);
-            return piRequest({ type: 'set_thinking_level', thinkingLevel });
+            return piRequest({ type: 'set_thinking_level', level: thinkingLevel });
           })
           .then((r) => {
             if (done) return;
             if (!r || r.success !== true) { giveUp('set_thinking_level was rejected'); return; }
-            done = true; clearTimeout(timer);
-            applied.thinkingLevel = thinkingLevel;
-            settle();
+            return piRequest({ type: 'get_state' }).then(state => {
+              if (done) return;
+              const actual = state?.success === true ? state.data?.thinkingLevel : undefined;
+              if (actual !== thinkingLevel) { giveUp('thinking level was not applied: requested ' + thinkingLevel + ', observed ' + actual); return; }
+              done = true; clearTimeout(timer);
+              applied.thinkingLevel = actual;
+              settle();
+            });
           })
           .catch((e) => giveUp(e && e.readiness ? `the harness did not come up: ${e.message}` : 'cannot set thinking level: ' + e.message));
+        if (model !== undefined) applyThinkingAfterModel = applyThinking; else applyThinking();
       }
 
       if (model !== undefined) {
@@ -1249,6 +1292,7 @@ function handleBusMessage(msg) {
               if (connectionId) applied.modelProviderId = connectionId;
               applied.model = hit.id;
               applied.configRevision = null;
+              if (applyThinkingAfterModel) applyThinkingAfterModel();
               settle();
             })
             .catch((e) => rejectModel(e && e.readiness ? `the harness did not come up: ${e.message}` : 'cannot set model: ' + e.message));
@@ -1382,6 +1426,24 @@ function handleBusMessage(msg) {
       }).catch((e) => send({ jsonrpc: '2.0', id, error: { code: -32000, message: `stats failed: ${e.message}` } }));
       return;
     }
+    case 'history/read': {
+      // Read through native persistence without starting a harness or configuring
+      // a provider. Only the hub supplies the existing session reference.
+      try {
+        if (typeof params.ref !== 'string' || !fs.existsSync(params.ref)) throw new Error('session history reference unavailable');
+        const entries = enrichHistory(params.ref, loadTranscript(params.ref));
+        let end = entries.length;
+        if (params.beforeId != null) {
+          end = entries.findIndex(e => e.id === params.beforeId);
+          if (end < 0) throw new Error('unknown beforeId: ' + params.beforeId);
+        }
+        const start = Math.max(0, end - Math.max(1, Number(params.limit) || 100));
+        send({jsonrpc:'2.0',id,result:{messages:entries.slice(start,end),hasMore:start>0}});
+      } catch (e) {
+        send({jsonrpc:'2.0',id,error:{code:-32000,message:e.message,data:{code:'history_unavailable'}}});
+      }
+      return;
+    }
     case 'history/page': {
       if (!currentRef) {
         send({ jsonrpc: '2.0', id, error: { code: -32000, message: 'no session open' } });
@@ -1405,7 +1467,7 @@ function handleBusMessage(msg) {
       const start = Math.max(0, end - limit);
       const page = entries.slice(start, end).map((e) => ({ ...e, complete: true }));
       send({ jsonrpc: '2.0', id, result: { messages: page, hasMore: start > 0 } });
-      }).catch(e => send({ jsonrpc: '2.0', id, error: { code: -32000, message: e.message } }));
+      }).catch(e => send({ jsonrpc: '2.0', id, error: { code: -32000, message: e.message, data: { code: 'history_unavailable' } } }));
       return;
     }
     // runtime/prepare: materialise the harness this plugin drives. The manifest pins it
@@ -1494,10 +1556,10 @@ function readJsonFile(path) {
   try { return JSON.parse(fs.readFileSync(path, 'utf8')); } catch { return null; }
 }
 
+// This adapter's managed configuration is also used by auth and runtime startup.
 function piAgentDir() {
-  const fromEnv = process.env.PI_CODING_AGENT_DIR;
-  if (fromEnv) return fromEnv;
-  return path.join(process.env.USERPROFILE || process.env.HOME || '', '.pi', 'agent');
+  if (!process.env.AGENT_HUB_HARNESS_DIR) throw new Error('AGENT_HUB_HARNESS_DIR is required for managed configuration');
+  return process.env.PI_CODING_AGENT_DIR;
 }
 
 // Mirrors the deleted shell's pi_installation::available(): the catalog
@@ -1555,10 +1617,8 @@ function scanModels() {
       name: typeof m.name === 'string' && m.name ? m.name : m.id,
       supportsImages: m.supportsImages !== false,
       reasoning: m.reasoning === true,
-      // Only what the model declared. A model that reasons without naming its
-      // levels reports none, so the core answers 'default' rather than a level
-      // set the adapter made up.
-      ...(declaredThinkingLevels(m) ? { thinkingLevels: declaredThinkingLevels(m) } : {}),
+      // Only what the model's configuration states, verbatim.
+      ...(configThinkingLevels(m) ? { thinkingLevels: configThinkingLevels(m) } : {}),
       authStatus: 'authenticated',
       configured: provider in configured,
     });
@@ -1587,7 +1647,8 @@ function managedModels(providers) {
     const provider = INJECT_PREFIX + row.id;
     for (const m of Array.isArray(row.models) ? row.models : []) {
       if (!m || typeof m.id !== 'string' || !m.id) continue;
-      const efforts = m.reasoning && Array.isArray(m.reasoning.efforts) ? m.reasoning.efforts : null;
+      // The levels the hub's declaration states, passed on verbatim.
+      const levels = Array.isArray(m.thinkingLevels) ? m.thinkingLevels.filter((l) => typeof l === 'string' && l) : null;
       out[provider + '::' + m.id] = {
         connectionId: provider,
         provider,
@@ -1599,8 +1660,7 @@ function managedModels(providers) {
         // with a credential is — no probing of pi's own config for either.
         available: row.hasCredential === true,
         ...(row.hasCredential === true ? {} : { unavailableReason: 'needs-auth' }),
-        reasoning: Boolean(efforts && efforts.length),
-        ...(efforts && efforts.length ? { thinkingLevels: efforts } : {}),
+        ...(levels ? { thinkingLevels: levels } : {}),
         ...(Array.isArray(m.input) && m.input.length ? { input: m.input } : {}),
         ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
         ...(m.maxTokens ? { maxTokens: m.maxTokens } : {}),
