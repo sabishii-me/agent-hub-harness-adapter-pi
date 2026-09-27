@@ -1,7 +1,7 @@
 {
-  "name": "sabishii-me-harness-pi",
-  "version": "0.1.0",
+  "name": "sabishii-dev-harness-pi",
+  "version": "0.1.3",
   "private": true,
-  "description": "The pi harness plugin for sabishii-me-agent-hub: adapter, manifest, extensions and presets.",
+  "description": "The pi harness plugin for sabishii-dev-agent-hub: adapter, manifest, extensions and presets.",
   "main": "pi-adapter.cjs"
 }

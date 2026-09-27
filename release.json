@@ -1,0 +1,9 @@
+{
+  "name": "Pi",
+  "summary": "A coding-agent harness: the official pi runtime, driven over its own headless protocol.",
+  "repository": "sabishii-me/sabishii-dev-harness-pi",
+  "exclude": [
+    "runtime/docs",
+    "runtime/examples"
+  ]
+}
