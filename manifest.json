@@ -4,7 +4,7 @@
     "light": "logo-light.svg",
     "dark": "logo-dark.svg"
   },
-  "version": "0.1.5",
+  "version": "0.1.6",
   "protocol": 0,
   "command": [
     "node",
@@ -35,5 +35,14 @@
     "skills",
     "history-readonly"
   ],
-  "pluginType": "harness-adapter"
+  "pluginType": "harness-adapter",
+  "name": "Pi",
+  "summary": "A coding-agent harness: the official pi runtime, driven over its own headless protocol.",
+  "release": {
+    "repository": "sabishii-me/agent-hub-harness-adapter-pi",
+    "exclude": [
+      "runtime/docs",
+      "runtime/examples"
+    ]
+  }
 }
