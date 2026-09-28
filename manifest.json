@@ -1,11 +1,10 @@
 {
   "id": "pi",
-  "kind": "harness-adapter",
   "icons": {
     "light": "logo-light.svg",
     "dark": "logo-dark.svg"
   },
-  "version": "0.1.4",
+  "version": "0.1.5",
   "protocol": 0,
   "command": [
     "node",
@@ -35,5 +34,6 @@
     "rename",
     "skills",
     "history-readonly"
-  ]
+  ],
+  "pluginType": "harness-adapter"
 }
