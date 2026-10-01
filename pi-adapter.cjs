@@ -345,27 +345,55 @@ function modelDecl(id) { return injectedFacts.find((m) => m && m.id === id) || n
 // to tell which provider a catalog entry belongs to. One spelling, no slash.
 const INJECT_PREFIX = 'hub-';
 
-function probeModels(url, value) {
+// WHERE a provider's model list lives is a property of the DIALECT it speaks, not
+// something to assume. An OpenAI-compatible endpoint serves GET <base>/models; an
+// Anthropic-messages endpoint (the Anthropic SDK the harness uses) serves GET
+// <base>/v1/models, because its baseURL is the host root and the SDK appends /v1.
+// So try the dialect's path FIRST, then the other, and only fail when neither
+// answers: a probe that hits the wrong path turns a working provider into
+// 'cannot inject provider'.
+function modelsPathsFor(api, base) {
+  const openai = base + '/models';
+  const anthropic = base + '/v1/models';
+  if (api === 'anthropic-messages') return [anthropic, openai];
+  if (api) return [openai, anthropic];
+  // No dialect stated: try both, OpenAI first (the historical default).
+  return [openai, anthropic];
+}
+
+function fetchModelsOnce(mod, u, base, value) {
+  return new Promise((resolve, reject) => {
+    const req = mod.request({ method: 'GET', hostname: u.hostname, port: u.port || undefined, path: base, headers: { authorization: 'Bearer ' + value }, timeout: 15000 }, (res2) => {
+      let b = '';
+      res2.setEncoding('utf8');
+      res2.on('data', (d) => { b += d; });
+      res2.on('end', () => {
+        if (res2.statusCode < 200 || res2.statusCode >= 300) return reject(new Error(`${base} -> ${res2.statusCode}`));
+        let j; try { j = JSON.parse(b); } catch { return reject(new Error(`${base} is not JSON`)); }
+        const list = Array.isArray(j.data) ? j.data : Array.isArray(j.models) ? j.models : null;
+        if (!list) return reject(new Error(`${base} has no model array`));
+        resolve(list.map((m) => (typeof m === 'string' ? m : m.id)).filter(Boolean));
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error(`${base} timed out`)));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function probeModels(url, value, api) {
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(url); } catch { return reject(new Error('invalid provider url: ' + url)); }
     const mod = u.protocol === 'https:' ? require('https') : require('http');
     const base = u.pathname.replace(/\/$/, '');
-    const req = mod.request({ method: 'GET', hostname: u.hostname, port: u.port || undefined, path: base + '/models', headers: { authorization: 'Bearer ' + value }, timeout: 15000 }, (res2) => {
-      let b = '';
-      res2.setEncoding('utf8');
-      res2.on('data', (d) => { b += d; });
-      res2.on('end', () => {
-        if (res2.statusCode < 200 || res2.statusCode >= 300) return reject(new Error(`provider ${url} /models -> ${res2.statusCode}`));
-        let j; try { j = JSON.parse(b); } catch { return reject(new Error('provider /models is not JSON')); }
-        const list = Array.isArray(j.data) ? j.data : Array.isArray(j.models) ? j.models : null;
-        if (!list) return reject(new Error('provider /models has no model array'));
-        resolve(list.map((m) => (typeof m === 'string' ? m : m.id)).filter(Boolean));
-      });
-    });
-    req.on('timeout', () => req.destroy(new Error('provider /models timed out')));
-    req.on('error', reject);
-    req.end();
+    const paths = modelsPathsFor(api, base);
+    let lastErr = null;
+    const attempt = (i) => {
+      if (i >= paths.length) return reject(new Error(`provider ${url} models: ${lastErr ? lastErr.message : 'no path answered'}`));
+      fetchModelsOnce(mod, u, paths[i], value).then(resolve, (e) => { lastErr = e; attempt(i + 1); });
+    };
+    attempt(0);
   });
 }
 
@@ -1009,7 +1037,7 @@ function handleBusMessage(msg) {
       if (granted.url && granted.value) {
         injectedEnvName = 'AGENT_HUB_INJECTED_' + String(granted.connectionId || 'PROVIDER').replace(/[^A-Za-z0-9]/g, '_').toUpperCase() + '_API_KEY';
         injectedDir = buildInjectedDir();
-        probeModels(granted.url, granted.value).then((models) => {
+        probeModels(granted.url, granted.value, granted.api).then((models) => {
           injectedModels = models;
           applyInjectedProvider(injectedDir, models);
           // The injected agent dir + token env only reach pi at SPAWN, and pi
@@ -1112,6 +1140,15 @@ function handleBusMessage(msg) {
           if (state?.success !== true) throw new Error('cannot read effective configuration');
           const actual = state.data;
           if (actual.model) { applied.model = actual.model.id; applied.connectionId = actual.model.provider; }
+          // A HUB-INJECTED provider must be reported by BOTH identities, exactly
+          // as config/set does (adapter-v1): applied.modelProviderId is the hub's
+          // provider id, applied.connectionId is its RESOLVED NATIVE ROUTE
+          // (`hub-<id>`). Without this the core refuses an unconfirmed identity at
+          // start - correctly, because a bare native name is not the hub's id.
+          if (granted && granted.url && granted.value && granted.connectionId) {
+            applied.modelProviderId = granted.connectionId;
+            applied.connectionId = INJECT_PREFIX + granted.connectionId;
+          }
           applied.thinkingLevel = typeof actual.thinkingLevel === 'string' ? actual.thinkingLevel : null;
           return piRequest({ type: 'get_entries' });
         }).then(result => {
