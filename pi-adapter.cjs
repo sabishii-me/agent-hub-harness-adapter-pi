@@ -769,7 +769,7 @@ function handlePiMessage(msg) {
     terminalSent = true;
     lastStopReason = undefined;
     turnsRun += 1;
-    send({ jsonrpc: '2.0', method: 'event', params: { sid, data: { type: 'turn_end', status } } });
+    send({ jsonrpc: '2.0', method: 'event', params: { sid, data: { type: 'turn_end', clientMessageId: currentClientMessageId, state: status === 'completed' ? 'ok' : status, status } } });
     // The plan extension can change plan mode on its own — the model leaves
     // plan mode when its plan is approved. Read the state back and report the
     // change, so the core's view follows the harness rather than the last thing
@@ -818,6 +818,7 @@ let terminalSent = false; // guards against pi emitting two turn_end for one tur
 // "error"). We report the first as our terminal; the second arrives later and
 // must be swallowed, or it leaks into the NEXT turn.
 let turnActive = false; // true from prompt start until we report a terminal turn_end
+let currentClientMessageId; // the clientMessageId of the turn in flight, echoed on turn_end
 let lastStopReason;     // last turn_end stopReason seen in the active turn
 // How many turns this session has produced. A preset is a session composition
 // — swapping tools under a conversation leaves logged tool calls the new
@@ -1007,6 +1008,7 @@ function handleBusMessage(msg) {
         // Arm the turn now that pi has acknowledged it; only from here can a
         // turn_end belong to THIS turn.
         turnActive = true;
+        currentClientMessageId = params.clientMessageId;
         terminalSent = false;
         lastStopReason = undefined;
         const status = await turnEnded;
