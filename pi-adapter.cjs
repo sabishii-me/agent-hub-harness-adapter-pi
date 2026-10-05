@@ -1190,7 +1190,12 @@ function handleBusMessage(msg) {
           const planEntry = entries.filter(e => e.customType === 'plan/mode').at(-1);
           const reviewEntry = entries.filter(e => e.customType === 'hub-review/state').at(-1);
           if (typeof planEntry?.data?.active === 'boolean') applied.plan = planEntry.data.active;
-          if (typeof reviewEntry?.data?.asking === 'boolean') applied.review = reviewEntry.data.asking;
+          // Only take the LOG's value when this request did not ask to change review.
+          // When it did, `reviewCommand` already OBSERVED the switch take effect (a NEW
+          // state entry); clobbering it here with `.at(-1)` would re-introduce the race
+          // this whole path exists to close (20261004-070000: a log record read as the
+          // live gate).
+          if (review === undefined && typeof reviewEntry?.data?.asking === 'boolean') applied.review = reviewEntry.data.asking;
           reply({ jsonrpc: '2.0', id, result: { applied, requires: 'none' } });
         }).catch(error => reply({ jsonrpc: '2.0', id, error: { code: -32000, message: error.message } }));
       };
