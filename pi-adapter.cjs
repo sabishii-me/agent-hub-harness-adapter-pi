@@ -29,12 +29,11 @@ const path = require('path');
 const PLUGIN_DIR = __dirname;
 
 // The hub gives ONE directory per harness (<DATA_DIR>/agents/<harness>, handed over
-// as AGENT_HUB_HARNESS_DIR). That IS the harness's home: every session of this
-// harness shares it. pi reads its config from PI_CODING_AGENT_DIR; point it at that
-// one dir so all sessions share one config (the hub-owned copy, never the user's
-// real ~/.pi). One harness, one home.
+// as AGENT_HUB_HARNESS_DIR). Inside it, pi's home is ONE stable subdir shared by
+// every session of this harness (the hub-owned copy, never the user's real ~/.pi).
+// One harness -> one home; never a new home per session or per injection.
 if (process.env.AGENT_HUB_HARNESS_DIR) {
-  process.env.PI_CODING_AGENT_DIR = process.env.AGENT_HUB_HARNESS_DIR;
+  process.env.PI_CODING_AGENT_DIR = path.join(process.env.AGENT_HUB_HARNESS_DIR, 'pi-agent');
 }
 
 
