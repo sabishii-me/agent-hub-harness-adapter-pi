@@ -438,6 +438,7 @@ function thinkingLevelMapFor(decl) {
 }
 
 function applyInjectedProvider(dir, modelIds) {
+  fs.mkdirSync(dir, { recursive: true });
   const p = path.join(dir, 'models.json');
   const cfg = readJsonFile(p) || {};
   cfg.providers = cfg.providers || {};
