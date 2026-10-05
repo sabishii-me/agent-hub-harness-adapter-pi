@@ -28,10 +28,13 @@ const path = require('path');
 // happened to spawn the adapter from.
 const PLUGIN_DIR = __dirname;
 
-// Managed instances never borrow the terminal's native configuration home.
-// Apply once so catalogue, authentication and all child processes agree.
+// The hub gives ONE directory per harness (<DATA_DIR>/agents/<harness>, handed over
+// as AGENT_HUB_HARNESS_DIR). That IS the harness's home: every session of this
+// harness shares it. pi reads its config from PI_CODING_AGENT_DIR; point it at that
+// one dir so all sessions share one config (the hub-owned copy, never the user's
+// real ~/.pi). One harness, one home.
 if (process.env.AGENT_HUB_HARNESS_DIR) {
-  process.env.PI_CODING_AGENT_DIR = path.join(process.env.AGENT_HUB_HARNESS_DIR, 'pi-agent');
+  process.env.PI_CODING_AGENT_DIR = process.env.AGENT_HUB_HARNESS_DIR;
 }
 
 
@@ -420,15 +423,10 @@ function probeModels(url, value, api) {
   });
 }
 
+// The hub-managed provider is injected into pi's ONE config dir (the harness dir),
+// in ITS agent files. No extra dir is created: one harness, one home.
 function buildInjectedDir() {
-  const base = piAgentDir();
-  const dir = path.join(SESSIONS_DIR, 'injected-' + (granted.connectionId || 'provider').replace(/[^A-Za-z0-9_.-]/g, '_'));
-  fs.mkdirSync(dir, { recursive: true });
-  for (const f of ['models.json', 'auth.json', 'models-store.json', 'settings.json']) {
-    const src = path.join(base, f);
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dir, f));
-  }
-  return dir;
+  return process.env.PI_CODING_AGENT_DIR;
 }
 
 // A declaration's levels become the harness's own level map, mechanically: each
