@@ -75,22 +75,15 @@ const ADDITIONAL_DIRS = JSON.parse(process.env.AGENT_HUB_ADDITIONAL_DIRS || '[]'
 // Which directory name an extension takes in the workspace is the harness's own
 // rule, so that mapping lives here.
 const INSTALLED_EXT_DIR = process.env.AGENT_HUB_INSTALLED_EXTENSIONS_DIR || null;
-const EXT_DEST = { 'agent-presets': 'agent-presets', plan: 'hub-plan' };
-function copyTree(src, dst) {
-  fs.mkdirSync(dst, { recursive: true });
-  for (const name of fs.readdirSync(src)) {
-    const from = path.join(src, name);
-    const to = path.join(dst, name);
-    if (fs.statSync(from).isDirectory()) copyTree(from, to);
-    else fs.copyFileSync(from, to);
-  }
-}
-function placeExtension(id, cwd) {
-  const dest = EXT_DEST[id];
+// The hub installed this harness's extensions into a hub-owned snapshot dir and
+// handed it over as AGENT_HUB_INSTALLED_EXTENSIONS_DIR. The adapter does NOT copy
+// them into the user's workspace: it POINTS the harness at the hub-owned dir with
+// discovery OFF (pi: --no-extensions --extension <dir>), exactly as it already
+// does for skills (--no-skills --skill <dir>). Placement is the hub's; this only
+// resolves WHERE the harness reads it from.
+function extensionDirFor(id) {
   const src = INSTALLED_EXT_DIR ? path.join(INSTALLED_EXT_DIR, id) : null;
-  if (!src || !dest || !cwd || !fs.existsSync(src)) return false;
-  copyTree(src, path.join(cwd, '.pi', 'extensions', dest));
-  return true;
+  return src && fs.existsSync(src) ? src : null;
 }
 let activePresetId = null;
 let planActive = null;    // the plan state this adapter last reported (null = not yet known)
@@ -107,14 +100,13 @@ function listShippedPresets() {
   }
   return out;
 }
-// The hub installed agent-presets for this harness; put it where pi looks. Not
-// installed = not placed, which is how removing it from the registry takes
-// effect.
-function installAgentPresetsExt(cwd) { return placeExtension('agent-presets', cwd); }
-function writeActivePreset(cwd, presetId) {
+function writeActivePreset(presetId) {
   // Build {active, presets:{id:{systemPrompt,tools}}} from shipped definitions
-  // and drop it where the extension reads it (AGENT_PRESETS_CONFIG).
-  const definitionsPath = path.join(cwd, '.pi', 'agent-presets.json');
+  // and drop it in the hub-owned harness dir (NOT the user workspace): that path
+  // is what the extension reads via AGENT_PRESETS_CONFIG.
+  const base = process.env.AGENT_HUB_HARNESS_DIR;
+  if (!base) return null;
+  const definitionsPath = path.join(base, 'agent-presets.json');
   const cfg = { active: presetId || null, presets: {} };
   if (presetId && PRESETS_DIR) {
     const src = path.join(PRESETS_DIR, `${presetId}.json`);
@@ -129,11 +121,11 @@ function writeActivePreset(cwd, presetId) {
 }
 
 // --- plan mode (session-scoped capability) -----------------------------------
-// pi has no native plan mode, so the hub ships one as an extension and installs
-// it into the workspace for the session. The adapter drives it the same way a
-// user would — the `/plan` command — and reads the state back from the session
-// log the extension writes, so nothing here needs a private side channel.
-function installPlanExt(cwd) { return placeExtension('plan', cwd); }
+// pi has no native plan mode, so the hub ships one as an extension; the adapter
+// loads it from the hub-owned dir at spawn (--extension). It drives the extension
+// the same way a user would — the `/plan` command — and reads the state back from
+// the session log the extension writes, so nothing here needs a private side
+// channel.
 
 // Drive the plan command over pi's rpc. An extension command runs through
 // `prompt` (it is not queued, and it produces no model turn of its own), which
@@ -490,31 +482,33 @@ function startPi(resumeRef) {
   // Never create a file on resume: missing existing references must fail.
   if (!resumeRef) fs.closeSync(fs.openSync(ref, 'wx'));
 
-  // --approve: trust the user's own project so its project-local resources
-  // (.pi/extensions, skills, prompts) load and become active. This is NOT a
-  // bypass of approvals: it only lets the project's own extensions load; those
-  // extensions then run their normal gating (the approval path we test).
-  const args = [...piRuntime.args, '--mode', 'rpc', '--session', ref, '--session-dir', SESSIONS_DIR, '--approve'];
+  // Extensions and skills are HUB-OWNED resources: the hub installed them into its
+  // data dir and handed the paths over. The adapter points pi at those dirs with
+  // discovery OFF - it never copies them into the user's project dir and never
+  // trusts the project to load them:
+  //   --no-extensions  turns off pi's own (discovered/configured/built-in) load,
+  //                    so a managed session loads ONLY the hub's extensions;
+  //   --extension <d>  adds each hub extension back (explicit, additive).
+  // Same shape the skills path already uses (--no-skills --skill <dir>).
+  const args = [...piRuntime.args, '--mode', 'rpc', '--session', ref, '--session-dir', SESSIONS_DIR];
+  // Extensions: load each hub-installed extension the hub selected for this
+  // harness, straight from the hub-owned snapshot dir.
+  const presetsExtDir = extensionDirFor('agent-presets');
+  const planExtDir = extensionDirFor('plan');
+  if (presetsExtDir || planExtDir) args.push('--no-extensions');
+  if (presetsExtDir) args.push('--extension', presetsExtDir);
+  if (planExtDir) args.push('--extension', planExtDir);
   // Skills: the hub installs them into a directory of its own and hands it over.
   // `--no-skills` turns OFF pi's own discovery, so a managed session sees exactly what
   // the hub installed — not the user's ~/.agents/skills (isolation) — and `--skill`
   // adds the hub's directory back (it is additive even with --no-skills).
   if (process.env.AGENT_HUB_INSTALLED_SKILLS_DIR) args.push('--no-skills', '--skill', process.env.AGENT_HUB_INSTALLED_SKILLS_DIR);
   const env = { ...process.env };
-  // A session preset: ensure the agent-presets extension is installed in the
-  // workspace and hand the extension the definition file it reads.
-  // Place only the extension the hub installed, before the child discovers it.
-  if (process.env.AGENT_HUB_CWD) installAgentPresetsExt(process.env.AGENT_HUB_CWD);
+  // A session preset: hand the extension the definition file it reads. The file
+  // lives in the hub-owned harness dir, NOT the user workspace.
   if (activePresetId !== null) {
-    const wcwd = process.env.AGENT_HUB_CWD || undefined;
-    if (wcwd) {
-      installAgentPresetsExt(wcwd);
-      env.AGENT_PRESETS_CONFIG = writeActivePreset(wcwd, activePresetId);
-    }
+    env.AGENT_PRESETS_CONFIG = writeActivePreset(activePresetId);
   }
-  // Plan mode's extension travels with the session's workspace too, so a
-  // `/plan` from the core has something to run against.
-  if (process.env.AGENT_HUB_CWD) installPlanExt(process.env.AGENT_HUB_CWD);
   // J-2: inject the hub-managed provider into a private agent dir.
   if (granted && granted.url && granted.value) {
     if (!injectedEnvName) injectedEnvName = 'AGENT_HUB_INJECTED_' + String(granted.connectionId || 'PROVIDER').replace(/[^A-Za-z0-9]/g, '_').toUpperCase() + '_API_KEY';
@@ -1244,7 +1238,6 @@ function handleBusMessage(msg) {
             reply({ jsonrpc: '2.0', id, error: { code: -32000, message: 'cannot apply preset: no live harness to carry it' } });
             return;
           }
-          if (cwd) { installAgentPresetsExt(cwd); writeActivePreset(cwd, presetId || null); }
           // Record the choice BEFORE respawning: startPi reads activePresetId to
           // hand the child its AGENT_PRESETS_CONFIG, so a restart that ran first
           // would spawn a pi with no preset — which is exactly the silent
@@ -1260,9 +1253,9 @@ function handleBusMessage(msg) {
       if (plan !== undefined) {
         // Plan mode is a session-scoped capability, not a composition: toggle it
         // through the extension's own command and read the state back from the
-        // log it writes. No restart — the harness owns the state from here.
-        const cwd = process.env.AGENT_HUB_CWD;
-        if (cwd) installPlanExt(cwd);
+        // log it writes. No restart — the harness owns the state from here. The
+        // plan extension was already loaded at spawn (--extension); a harness the
+        // hub did not install it for simply has no command and reports unapplied.
         pendingCount += 1;
         planCommand(plan === true, (state) => {
           if (state !== null && state !== undefined) { applied.plan = state; planActive = state; }
@@ -1272,10 +1265,9 @@ function handleBusMessage(msg) {
 
       if (review !== undefined) {
         // The review switch is the preset extension's own state. Drive its
-        // command and read the log back; like plan, it must be installed so a
-        // mid-session switch has something to run against.
-        const cwd = process.env.AGENT_HUB_CWD;
-        if (cwd) installAgentPresetsExt(cwd);
+        // command and read the log back. The agent-presets extension was loaded
+        // at spawn (--extension); a harness the hub did not install it for has
+        // no /review command and the switch reports unapplied.
         pendingCount += 1;
         reviewCommand(review === true, (state, error) => {
           if (error) { reply({ jsonrpc: '2.0', id, error: { code: -32000, message: error.message, data: { code: 'review-not-applied' } } }); return; }
