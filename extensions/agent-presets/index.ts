@@ -57,6 +57,11 @@ export default function agentPresets(pi) {
   // `/review on` asks again. The switch is per session and lives in the log.
   const review = { on: preset.approve === true };
   const FIELD = "hub-review/state";
+  // Whether review has a state worth recording. A preset's approve is carried
+  // into the spawn (AGENT_PRESETS_CONFIG), so the extension's load-time value is
+  // already authoritative; a spawn with NO preset has nothing to record. Only a
+  // preset in force, or an explicit /review on|off, is a decision.
+  let reviewDecided = preset.approve === true;
 
   {
     pi.on("tool_call", async (event, ctx) => {
@@ -100,6 +105,7 @@ export default function agentPresets(pi) {
           return;
         }
         review.on = arg === "on";
+        reviewDecided = true;
         pi.appendEntry(FIELD, { asking: review.on });
         ctx.ui?.notify?.(`review ${review.on ? "on" : "off"}`);
       },
@@ -107,14 +113,25 @@ export default function agentPresets(pi) {
   }
 
   // A resumed session comes back in the mode it left in: the newest record wins.
+  // But the preset's approve is the session's STARTING state, carried by
+  // AGENT_PRESETS_CONFIG at spawn; the adapter starts pi once without the preset
+  // (before config/set names it), and that spawn must not leave a record that
+  // then overrides the preset on the preset-bearing spawn that resumes the same
+  // log. So RECORD only when this run has a real review state (a preset is in
+  // force, or the user toggled, or a recorded state was restored); a spawn with
+  // no preset and nothing recorded leaves no trace to poison a later spawn.
   pi.on("session_start", async (_event, ctx) => {
+    let restored = false;
     try {
       const last = ctx.sessionManager
         .getEntries()
         .filter((e) => e && e.type === "custom" && e.customType === FIELD)
         .pop();
-      if (last && last.data && typeof last.data.asking === "boolean") review.on = last.data.asking;
+      if (last && last.data && typeof last.data.asking === "boolean") {
+        review.on = last.data.asking;
+        restored = true;
+      }
     } catch {}
-    pi.appendEntry(FIELD, { asking: review.on });
+    if (reviewDecided || restored) pi.appendEntry(FIELD, { asking: review.on });
   });
 }

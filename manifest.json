@@ -1,11 +1,10 @@
 {
   "id": "pi",
-  "pluginType": "harness-adapter",
   "icons": {
     "light": "logo-light.svg",
     "dark": "logo-dark.svg"
   },
-  "version": "0.1.5",
+  "version": "0.1.10",
   "protocol": 0,
   "command": [
     "node",
@@ -13,7 +12,7 @@
   ],
   "runtime": {
     "package": "@earendil-works/pi-coding-agent",
-    "version": "0.85.1",
+    "version": "1.0.0",
     "command": [
       "node",
       "runtime/dist/cli.js"
@@ -35,5 +34,15 @@
     "rename",
     "skills",
     "history-readonly"
-  ]
+  ],
+  "pluginType": "harness-adapter",
+  "name": "Pi",
+  "summary": "A coding-agent harness: the official pi runtime, driven over its own headless protocol.",
+  "release": {
+    "repository": "sabishii-me/agent-hub-harness-adapter-pi",
+    "exclude": [
+      "runtime/docs",
+      "runtime/examples"
+    ]
+  }
 }
