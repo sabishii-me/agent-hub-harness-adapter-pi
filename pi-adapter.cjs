@@ -466,7 +466,17 @@ function applyInjectedProvider(dir, modelIds) {
       };
     }),
   };
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
+  // The home is SHARED by every session of this harness, so N concurrent starts
+  // would each rewrite models.json - and a concurrent reader (scanModels, in the
+  // other start processes) can catch a half-written file and report 'cannot apply
+  // model' (docs/issues/20261005-040000). The injected entry is IDENTICAL every
+  // start, so write ONLY when the content actually changes: once the home is
+  // converged (the first start), every later start leaves the file untouched, and
+  // the concurrent-write race disappears.
+  const next = JSON.stringify(cfg, null, 2);
+  let current = null;
+  try { current = fs.readFileSync(p, 'utf8'); } catch {}
+  if (current !== next) fs.writeFileSync(p, next);
 }
 
 function startPi(resumeRef) {
